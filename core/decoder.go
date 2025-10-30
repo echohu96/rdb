@@ -23,6 +23,10 @@ type Decoder struct {
 
 	withSpecialOpCode bool
 	withSpecialTypes  map[string]ModuleTypeHandleFunc
+
+	// Redis 7.0+ metadata (RDB v12)
+	currentFreq uint8  // LFU frequency (0-255)
+	currentIdle uint64 // LRU idle time
 }
 
 // NewDecoder creates a new RDB decoder
@@ -54,9 +58,9 @@ const (
 )
 
 const (
+	opCodeFreq         = 244 /* LFU frequency. (Redis 7.0+) */
+	opCodeIdle         = 245 /* LRU idle time. (Redis 7.0+) */
 	opCodeModuleAux    = 247 /* Module auxiliary data. */
-	opCodeIdle         = 248 /* LRU idle time. */
-	opCodeFreq         = 249 /* LFU frequency. */
 	opCodeAux          = 250 /* RDB aux field. */
 	opCodeResizeDB     = 251 /* Hash table resize hint. */
 	opCodeExpireTimeMs = 252 /* Expire time in milliseconds. */
@@ -428,16 +432,18 @@ func (dec *Decoder) parse(cb func(object model.RedisObject) bool) error {
 			}
 			continue
 		} else if b == opCodeFreq {
-			_, err = dec.readByte()
+			freq, err := dec.readByte()
 			if err != nil {
 				return err
 			}
+			dec.currentFreq = freq
 			continue
 		} else if b == opCodeIdle {
-			_, _, err = dec.readLength()
+			idle, _, err := dec.readLength()
 			if err != nil {
 				return err
 			}
+			dec.currentIdle = idle
 			continue
 		} else if b == opCodeModuleAux {
 			_, _, err = dec.readModuleType()
@@ -466,6 +472,9 @@ func (dec *Decoder) parse(cb func(object model.RedisObject) bool) error {
 		base.Size = memprofiler.SizeOfObject(obj)
 		base.Type = obj.GetType()
 		tbc := cb(obj)
+		// Reset metadata after processing each object
+		dec.currentFreq = 0
+		dec.currentIdle = 0
 		if !tbc {
 			break
 		}
